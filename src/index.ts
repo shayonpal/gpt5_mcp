@@ -46,15 +46,15 @@ if (!API_KEY) {
 const gpt5Client = new GPT5Client(
   API_KEY,
   parseFloat(process.env.DEFAULT_TEMPERATURE || '0.7'),
-  (process.env.DEFAULT_REASONING_EFFORT as any) || 'high',
-  parseInt(process.env.MAX_TOKENS_PER_REQUEST || '4000')
+  (process.env.DEFAULT_REASONING_EFFORT as any) || 'high'
+  // maxTokensDefault removed - using dynamic budget-aware limits
 );
 
 const costManager = new CostManager(
   {
     daily: parseFloat(process.env.DAILY_COST_LIMIT || '10'),
-    perTask: parseFloat(process.env.TASK_COST_LIMIT || '2'),
-    tokenLimit: parseInt(process.env.MAX_TOKENS_PER_REQUEST || '4000')
+    perTask: parseFloat(process.env.TASK_COST_LIMIT || '5')
+    // tokenLimit removed - using dynamic budget-aware limits
   },
   process.env.DATA_DIR || './data'
 );
@@ -69,9 +69,10 @@ const ConsultGPT5Schema = z.object({
   prompt: z.string().describe('The prompt to send to GPT-5'),
   context: z.string().optional().describe('Additional context for the prompt'),
   temperature: z.number().min(0).max(2).default(0.7).describe('Sampling temperature'),
-  reasoning_effort: z.enum(['low', 'medium', 'high']).default('high').describe('Reasoning effort level'),
-  max_tokens: z.number().min(1).max(8000).default(4000).describe('Maximum tokens in response'),
-  task_budget: z.number().optional().describe('Budget limit for this specific task in USD')
+  reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high']).default('high').describe('Reasoning effort level'),
+  max_tokens: z.number().min(1).max(50000).default(20000).describe('Maximum tokens in response'),
+  task_budget: z.number().optional().describe('Budget limit for this specific task in USD'),
+  confirm_spending: z.boolean().default(false).describe('User confirmation to proceed with spending that exceeds daily limit')
 });
 
 const StartConversationSchema = z.object({
@@ -106,8 +107,163 @@ const server = new Server(
   }
 );
 
+// Helper function to estimate token count (more accurate approximation)
+function estimateTokenCount(text: string): number {
+  // Better approximation considering:
+  // - English text: ~4 chars per token
+  // - Code: ~3 chars per token
+  // - Special chars: higher ratio
+  const avgCharsPerToken = text.includes('function') || text.includes('class') || text.includes('import') ? 3 : 4;
+  return Math.ceil(text.length / avgCharsPerToken);
+}
+
+// Helper function to calculate max tokens based on remaining daily budget
+async function calculateMaxTokensFromBudget(costManager: CostManager, promptTokens: number): Promise<number> {
+  const report = await costManager.getDailyReport();
+  const remainingBudget = Math.max(0, report.limits.daily - report.usage.daily);
+  
+  // GPT-5 pricing: $0.00125 per 1K input tokens, $0.01 per 1K output tokens
+  // Reserve 70% of budget for output (since output is 8x more expensive than input)
+  const inputBudget = remainingBudget * 0.3;
+  const outputBudget = remainingBudget * 0.7;
+  
+  // Calculate max input tokens from input budget
+  const maxInputFromBudget = Math.floor(inputBudget / 0.00125 * 1000);
+  
+  // Calculate max output tokens from output budget  
+  const maxOutputFromBudget = Math.floor(outputBudget / 0.01 * 1000);
+  
+  // Total tokens = input + output, but we need to account for prompt tokens already calculated
+  const maxTotalTokens = maxInputFromBudget + maxOutputFromBudget + promptTokens;
+  
+  // Minimum reasonable limit (always allow some usage)
+  const minimumTokens = 5000;
+  
+  return Math.max(minimumTokens, maxTotalTokens);
+}
+
+// Helper function to calculate safe input token limit considering expected output
+function calculateSafeInputTokens(maxTokens: number, promptTokens: number): number {
+  // Reserve tokens for output (GPT-5 output can be 2-4x input size for complex reasoning)
+  const outputReserve = Math.max(1000, promptTokens * 2);
+  const safeInput = maxTokens - outputReserve - promptTokens;
+  return Math.max(500, safeInput); // Always leave minimum 500 tokens for content
+}
+
+// Helper function to truncate text to fit within token limits
+function truncateText(text: string, maxTokens: number): string {
+  const estimatedTokens = estimateTokenCount(text);
+  if (estimatedTokens <= maxTokens) return text;
+  
+  const maxChars = maxTokens * 4;
+  return text.substring(0, maxChars) + '\n\n[... content truncated to prevent token waste - file too large for current task budget ...]';
+}
+
+// Helper function to process MCP resources into text content with size limits
+async function processResources(meta?: any, maxTokens: number = 2000): Promise<string> {
+  if (!meta) return '';
+  
+  let resourceContent = '';
+  
+  try {
+    // Handle different ways resources might be passed
+    // MCP can pass resources in various formats
+    
+    if (meta.resources && Array.isArray(meta.resources)) {
+      for (const resource of meta.resources) {
+        if (resource.text) {
+          const header = `\n--- Resource: ${resource.name || resource.uri || 'file'} ---\n`;
+          const footer = '\n--- End Resource ---\n';
+          
+          // Check remaining token budget
+          const usedTokens = estimateTokenCount(resourceContent);
+          const availableTokens = maxTokens - usedTokens - estimateTokenCount(header + footer);
+          
+          if (availableTokens > 100) { // Need minimum space for content
+            const truncatedText = truncateText(resource.text, availableTokens);
+            resourceContent += header + truncatedText + footer;
+          } else {
+            resourceContent += '\n[... additional resources truncated due to token limits ...]\n';
+            break;
+          }
+        } else if (resource.content) {
+          const header = `\n--- Resource: ${resource.name || resource.uri || 'file'} ---\n`;
+          const footer = '\n--- End Resource ---\n';
+          
+          const usedTokens = estimateTokenCount(resourceContent);
+          const availableTokens = maxTokens - usedTokens - estimateTokenCount(header + footer);
+          
+          if (availableTokens > 100) {
+            const truncatedText = truncateText(resource.content, availableTokens);
+            resourceContent += header + truncatedText + footer;
+          } else {
+            resourceContent += '\n[... additional resources truncated due to token limits ...]\n';
+            break;
+          }
+        } else if (resource.uri) {
+          resourceContent += `\n--- File Reference: ${resource.uri} ---\n`;
+        }
+      }
+    }
+    
+    // Handle content array format (common in MCP)
+    if (meta.content && Array.isArray(meta.content)) {
+      for (const item of meta.content) {
+        const usedTokens = estimateTokenCount(resourceContent);
+        if (usedTokens >= maxTokens - 100) {
+          resourceContent += '\n[... additional content truncated due to token limits ...]\n';
+          break;
+        }
+        
+        if (item.type === 'text' && item.text) {
+          const header = `\n--- Attached Content ---\n`;
+          const footer = '\n--- End Content ---\n';
+          
+          const availableTokens = maxTokens - usedTokens - estimateTokenCount(header + footer);
+          if (availableTokens > 100) {
+            const truncatedText = truncateText(item.text, availableTokens);
+            resourceContent += header + truncatedText + footer;
+          }
+        } else if (item.type === 'resource' && item.resource) {
+          const res = item.resource;
+          const header = `\n--- Resource: ${res.name || res.uri || 'file'} ---\n`;
+          const footer = '\n--- End Resource ---\n';
+          
+          const availableTokens = maxTokens - usedTokens - estimateTokenCount(header + footer);
+          if (availableTokens > 100) {
+            if (res.text) {
+              const truncatedText = truncateText(res.text, availableTokens);
+              resourceContent += header + truncatedText + footer;
+            } else if (res.content) {
+              const truncatedText = truncateText(res.content, availableTokens);
+              resourceContent += header + truncatedText + footer;
+            }
+          }
+        }
+      }
+    }
+    
+    // Fallback: check if meta itself has content
+    if (!resourceContent && meta.text) {
+      const header = `\n--- Attached Content ---\n`;
+      const footer = `\n--- End Content ---\n`;
+      const availableTokens = maxTokens - estimateTokenCount(header + footer);
+      
+      if (availableTokens > 100) {
+        const truncatedText = truncateText(meta.text, availableTokens);
+        resourceContent = header + truncatedText + footer;
+      }
+    }
+    
+  } catch (error) {
+    logger.warn('Error processing resources:', error);
+  }
+  
+  return resourceContent;
+}
+
 // Tool handlers
-async function handleConsultGPT5(args: any): Promise<any> {
+async function handleConsultGPT5(args: any, meta?: any): Promise<any> {
   const params = ConsultGPT5Schema.parse(args);
   
   // Generate task ID
@@ -120,29 +276,72 @@ async function handleConsultGPT5(args: any): Promise<any> {
   }
 
   try {
-    // Build input
+    // Calculate maximum tokens based on remaining daily budget
+    const promptTokens = estimateTokenCount(params.prompt + (params.context || ''));
+    const budgetBasedMaxTokens = await calculateMaxTokensFromBudget(costManager, promptTokens);
+    
+    // Use the smaller of user-requested max_tokens or budget-based limit
+    const effectiveMaxTokens = Math.min(params.max_tokens, budgetBasedMaxTokens);
+    
+    // Calculate safe token limits for resources
+    const maxInputTokens = calculateSafeInputTokens(effectiveMaxTokens, promptTokens);
+    
+    // Process any attached resources with smart token limiting
+    const resourceContent = await processResources(meta, maxInputTokens);
+    
+    // Build input with resources
     let input = params.prompt;
-    if (params.context) {
+    
+    if (resourceContent) {
+      input = `Attached Files/Resources:\n${resourceContent}\n\n`;
+      
+      if (params.context) {
+        input += `Context:\n${params.context}\n\nRequest:\n${params.prompt}`;
+      } else {
+        input += `Request:\n${params.prompt}`;
+      }
+    } else if (params.context) {
       input = `Context:\n${params.context}\n\nRequest:\n${params.prompt}`;
     }
 
-    // Create response
+    // Inform user about effective token limit
+    if (effectiveMaxTokens < params.max_tokens) {
+      logger.info(`Token limit adjusted to ${effectiveMaxTokens} based on remaining daily budget (requested: ${params.max_tokens})`);
+    }
+
+    // Final safety check - if input is still too large, warn user
+    const finalInputTokens = estimateTokenCount(input);
+    if (finalInputTokens > maxInputTokens) {
+      logger.warn(`Input size (${finalInputTokens} tokens) may exceed safe limits for effective max_tokens=${effectiveMaxTokens}`);
+    }
+
+    // Pre-flight cost check with confirmation system
+    const estimatedUsage = {
+      inputTokens: finalInputTokens,
+      outputTokens: Math.min(effectiveMaxTokens - finalInputTokens, effectiveMaxTokens * 0.7),
+      totalTokens: finalInputTokens + Math.min(effectiveMaxTokens - finalInputTokens, effectiveMaxTokens * 0.7),
+      estimatedCost: ((finalInputTokens * 0.00125) + (Math.min(effectiveMaxTokens - finalInputTokens, effectiveMaxTokens * 0.7) * 0.01)) / 1000
+    };
+
+    const preCheck = await costManager.checkAndRecordUsage(taskId, estimatedUsage, params.confirm_spending);
+    
+    if (!preCheck.allowed && preCheck.needsConfirmation) {
+      return {
+        type: 'text',
+        text: `⚠️  Cost Confirmation Required\n\n${preCheck.reason}\n\nTo proceed, call this tool again with confirm_spending=true\n\nEstimated cost: $${estimatedUsage.estimatedCost.toFixed(4)}\nTask ID: ${taskId}`
+      };
+    }
+
+    // Create response with budget-aware token limit
     const response = await gpt5Client.createResponse({
       input,
       temperature: params.temperature,
       reasoning: { effort: params.reasoning_effort },
-      maxTokens: params.max_tokens
+      maxTokens: effectiveMaxTokens
     });
 
-    // Check and record cost
-    const costCheck = await costManager.checkAndRecordUsage(taskId, response.usage);
-    
-    if (!costCheck.allowed) {
-      return {
-        error: `Cost limit exceeded: ${costCheck.reason}`,
-        usage: response.usage
-      };
-    }
+    // Record actual cost (pre-flight estimation is replaced with actual usage)
+    const costCheck = await costManager.checkAndRecordUsage(taskId, response.usage, params.confirm_spending);
 
     const result = {
       content: response.text,
@@ -162,12 +361,16 @@ async function handleConsultGPT5(args: any): Promise<any> {
       (result as any).warning = costCheck.warning;
     }
 
-    return result;
+    // Return in proper MCP format - GPT-5 response as main content
+    return {
+      type: 'text',
+      text: result.content
+    };
   } catch (error: any) {
     logger.error('Error consulting GPT-5:', error);
     return {
-      error: error.message || 'Failed to consult GPT-5',
-      taskId
+      type: 'text',
+      text: `❌ Error: ${error.message || 'Failed to consult GPT-5'}\n\nTask ID: ${taskId}`
     };
   }
 }
@@ -182,14 +385,14 @@ async function handleStartConversation(args: any): Promise<any> {
     );
 
     return {
-      conversation_id: conversationId,
-      topic: params.topic,
-      message: `Started new conversation about: ${params.topic}`
+      type: 'text',
+      text: `✅ Started conversation: ${conversationId}\nTopic: ${params.topic}`
     };
   } catch (error: any) {
     logger.error('Error starting conversation:', error);
     return {
-      error: error.message || 'Failed to start conversation'
+      type: 'text',
+      text: `❌ Error starting conversation: ${error.message || 'Failed to start conversation'}`
     };
   }
 }
@@ -225,15 +428,8 @@ async function handleContinueConversation(args: any): Promise<any> {
       reasoning: { effort: 'high' }
     });
 
-    // Check and record cost
+    // Record cost and get warnings
     const costCheck = await costManager.checkAndRecordUsage(taskId, response.usage);
-    
-    if (!costCheck.allowed) {
-      return {
-        error: `Cost limit exceeded: ${costCheck.reason}`,
-        conversation_id: params.conversation_id
-      };
-    }
 
     // Add assistant response to conversation
     conversationManager.addMessage(params.conversation_id, 'assistant', response.text);
@@ -284,8 +480,8 @@ async function handleGetCostReport(args: any): Promise<any> {
         })),
         limits: {
           daily: report.limits.daily?.toFixed(2),
-          per_task: report.limits.perTask?.toFixed(2),
-          token_limit: report.limits.tokenLimit
+          per_task: report.limits.perTask?.toFixed(2)
+          // token_limit removed - using dynamic budget-aware limits
         },
         remaining: {
           daily: report.remaining.daily?.toFixed(2),
@@ -317,8 +513,8 @@ async function handleSetCostLimits(args: any): Promise<any> {
       message: 'Cost limits updated successfully',
       limits: {
         daily: currentLimits.daily?.toFixed(2),
-        per_task: currentLimits.perTask?.toFixed(2),
-        token_limit: currentLimits.tokenLimit
+        per_task: currentLimits.perTask?.toFixed(2)
+        // token_limit removed - using dynamic budget-aware limits
       }
     };
   } catch (error: any) {
@@ -368,7 +564,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case 'consult_gpt5':
-        return { content: [await handleConsultGPT5(args)] };
+        return { content: [await handleConsultGPT5(args, request.params._meta)] };
       
       case 'start_conversation':
         return { content: [await handleStartConversation(args)] };

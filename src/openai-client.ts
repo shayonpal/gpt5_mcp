@@ -15,18 +15,18 @@ export class GPT5Client {
   private client: OpenAI;
   private defaultTemperature: number;
   private defaultReasoningEffort: ReasoningEffort;
-  private maxTokensDefault: number;
+  // maxTokensDefault removed - using dynamic budget-aware limits
 
   constructor(
     apiKey: string,
     defaultTemperature = 0.7,
-    defaultReasoningEffort: ReasoningEffort = 'high',
-    maxTokensDefault = 4000
+    defaultReasoningEffort: ReasoningEffort = 'high'
+    // maxTokensDefault parameter removed
   ) {
     this.client = new OpenAI({ apiKey });
     this.defaultTemperature = defaultTemperature;
     this.defaultReasoningEffort = defaultReasoningEffort;
-    this.maxTokensDefault = maxTokensDefault;
+    // maxTokensDefault assignment removed
   }
 
   async createResponse(params: {
@@ -124,7 +124,7 @@ export class GPT5Client {
           model,
           messages,
           temperature: params.temperature ?? this.defaultTemperature,
-          max_tokens: params.maxTokens ?? this.maxTokensDefault
+          max_tokens: params.maxTokens ?? 4000 // Fallback default for GPT-4 only
         });
         modelUsed = model;
         break;

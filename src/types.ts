@@ -9,7 +9,7 @@ export interface TokenUsage {
 export interface CostLimits {
   perTask?: number;
   daily?: number;
-  tokenLimit?: number;
+  // tokenLimit removed - using dynamic budget-aware limits
 }
 
 export interface GPT5Response {
@@ -59,7 +59,7 @@ export interface CostBreakdown {
   };
 }
 
-export type ReasoningEffort = 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 
 export interface ConsultParams {
   prompt: string;

@@ -1,12 +1,13 @@
 import OpenAI from 'openai';
 import { TokenUsage, GPT5Response, ReasoningEffort } from './types.js';
 
-// Pricing per 1K tokens (estimated based on GPT-5 being premium)
+// Pricing per 1K tokens (official OpenAI Standard tier rates)
 const PRICING = {
   'gpt-5': {
-    input: 0.02,
-    output: 0.06,
-    reasoning: 0.10
+    input: 0.00125,   // $1.25 per 1M tokens = $0.00125 per 1K tokens
+    output: 0.01,     // $10.00 per 1M tokens = $0.01 per 1K tokens
+    cached: 0.000125, // $0.125 per 1M tokens = $0.000125 per 1K tokens
+    reasoning: 0.01   // Using output rate for reasoning tokens (no official rate specified)
   }
 };
 
@@ -112,10 +113,10 @@ export class GPT5Client {
       }
     }
 
-    // Use the most capable model available
-    const models = ['gpt-4-turbo-preview', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'];
+    // Use the most capable and cost-effective models available
+    const models = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo-preview', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'];
     let response: any;
-    let modelUsed = 'gpt-4-turbo-preview';
+    let modelUsed = 'gpt-4o';
 
     for (const model of models) {
       try {
@@ -196,12 +197,14 @@ export class GPT5Client {
   }
 
   private calculateCostForModel(model: string, usage: any): number {
-    // Fallback pricing for GPT-4 models
+    // Fallback pricing for GPT-4 models (official OpenAI Standard tier rates per 1K tokens)
     const fallbackPricing: Record<string, { input: number; output: number }> = {
-      'gpt-4-turbo-preview': { input: 0.01, output: 0.03 },
-      'gpt-4-turbo': { input: 0.01, output: 0.03 },
-      'gpt-4': { input: 0.03, output: 0.06 },
-      'gpt-3.5-turbo': { input: 0.0005, output: 0.0015 }
+      'gpt-4o': { input: 0.0025, output: 0.01 },           // $2.50/$10.00 per 1M
+      'gpt-4o-mini': { input: 0.00015, output: 0.0006 },   // $0.15/$0.60 per 1M
+      'gpt-4-turbo-preview': { input: 0.01, output: 0.03 }, // $10.00/$30.00 per 1M
+      'gpt-4-turbo': { input: 0.01, output: 0.03 },        // $10.00/$30.00 per 1M
+      'gpt-4': { input: 0.03, output: 0.06 },              // $30.00/$60.00 per 1M (legacy)
+      'gpt-3.5-turbo': { input: 0.0005, output: 0.0015 }   // $0.50/$1.50 per 1M (legacy)
     };
 
     const pricing = fallbackPricing[model] || fallbackPricing['gpt-4'];

@@ -2,7 +2,12 @@
 
 A Model Context Protocol (MCP) server that enables Claude Code to interact with OpenAI's GPT-5 model for collaborative planning and coding tasks. Features comprehensive cost management, conversation handling, and Docker support.
 
-## ⚠️ Important Notes
+## ⚠️ Important Requirements
+
+**OpenAI API Key Required**: This server requires a valid OpenAI API key with GPT-5 access. The key must be configured in the `.env` file as:
+```
+OPENAI_API_KEY=sk-your-actual-api-key-here
+```
 
 **GPT-5 API Compatibility**: This server is designed for OpenAI's GPT-5 Responses API. However, the GPT-5 API has specific parameter requirements that differ from traditional chat completions:
 
@@ -11,7 +16,7 @@ A Model Context Protocol (MCP) server that enables Claude Code to interact with 
 - ✅ **reasoning**: Supported with `effort` levels (low/medium/high)
 - ✅ **instructions**: Supported for system-level guidance
 
-**Automatic Fallback**: If GPT-5 is not available, the server automatically falls back to GPT-4 Turbo with full parameter support including temperature and max_tokens.
+**Automatic Fallback**: If GPT-5 is not available, the server automatically falls back to GPT-4o with full parameter support including temperature and max_tokens.
 
 ## Features
 
@@ -31,11 +36,34 @@ A Model Context Protocol (MCP) server that enables Claude Code to interact with 
 - Node.js 18+ (for local installation)
 - pnpm package manager (`npm install -g pnpm` or `corepack enable`)
 - Docker (optional, for containerized deployment)
-- OpenAI API key with GPT-5 access
+- **OpenAI API key with GPT-5 access** - Required and must be set in `.env` file
 
 ### Quick Start
 
-#### Interactive Installation (Recommended)
+#### Option 1: Claude Code CLI (Fastest)
+
+If you have Claude Code CLI installed:
+
+```bash
+# Clone and setup
+git clone <repository-url>
+cd gpt5-mcp
+cp .env.example .env
+
+# IMPORTANT: Edit .env and add your OpenAI API key:
+# OPENAI_API_KEY=sk-your-actual-api-key-here
+
+# Build the Docker image
+pnpm install && pnpm run build
+pnpm run docker:build
+
+# Add to Claude Code (this configures but doesn't start the server)
+claude mcp add gpt5 -s user -- docker run --rm -i --env-file /absolute/path/to/your/gpt5_mcp/.env gpt5-mcp:latest
+
+# Restart Claude Desktop to load the new server
+```
+
+#### Option 2: Interactive Installation
 
 ```bash
 # Clone the repository
@@ -74,7 +102,8 @@ pnpm install
 3. Configure environment:
 ```bash
 cp .env.example .env
-# Edit .env with your OpenAI API key
+# IMPORTANT: Edit .env and add your OpenAI API key
+# OPENAI_API_KEY=sk-your-actual-api-key-here
 ```
 
 4. Build the project:
@@ -159,7 +188,8 @@ pnpm run build
 
 # Ensure your .env file has your OpenAI API key
 cp .env.example .env
-# Edit .env and add: OPENAI_API_KEY=sk-your-actual-api-key-here
+# IMPORTANT: Edit .env and add your OpenAI API key:
+# OPENAI_API_KEY=sk-your-actual-api-key-here
 ```
 
 ### Step 2: Locate Claude Desktop Configuration
@@ -174,7 +204,27 @@ The configuration file location depends on your operating system:
 
 Choose one of the methods below:
 
-#### Method 1: Docker (Recommended)
+#### Method 1: Claude Code CLI Command (Easiest)
+
+If you have Claude Code CLI installed, you can add the server configuration with a single command:
+
+**Prerequisites:** 
+- Docker image must be built first: `pnpm run docker:build`
+- `.env` file must exist with your OpenAI API key
+
+```bash
+claude mcp add gpt5 -s user -- docker run --rm -i --env-file /absolute/path/to/your/gpt5_mcp/.env gpt5-mcp:latest
+```
+
+**Example:**
+```bash
+# Replace with your actual path
+claude mcp add gpt5 -s user -- docker run --rm -i --env-file /Users/administrator/Development/Claude/gpt5_mcp/.env gpt5-mcp:latest
+```
+
+**Important:** This command adds the server configuration to Claude Desktop. The Docker container will be started automatically when Claude Desktop needs to use the server. You still need to restart Claude Desktop after running this command.
+
+#### Method 2: Manual Docker Configuration
 
 Add this configuration to your `claude_desktop_config.json`:
 
@@ -236,7 +286,7 @@ Add this configuration to your `claude_desktop_config.json`:
 }
 ```
 
-#### Method 2: Local Installation
+#### Method 3: Local Installation
 
 ```json
 {
@@ -270,6 +320,18 @@ After restart, you should see the GPT-5 tools available in Claude Code:
 
 ### Alternative: Automated Setup
 
+#### Option 1: Claude Code CLI (Recommended)
+```bash
+# First build the Docker image
+pnpm run docker:build
+
+# Then add to Claude Code (configures but doesn't start the server)
+claude mcp add gpt5 -s user -- docker run --rm -i --env-file /absolute/path/to/your/gpt5_mcp/.env gpt5-mcp:latest
+
+# Restart Claude Desktop to load the server configuration
+```
+
+#### Option 2: Interactive Setup Script
 Use the interactive setup script for automatic configuration:
 
 ```bash
@@ -286,10 +348,13 @@ This script will:
 
 ### Configuration Tips
 
-1. **Use Absolute Paths**: Always use absolute paths in the configuration file
-2. **Docker Image Name**: Ensure the Docker image name matches what you built (`gpt5-mcp:latest`)
-3. **Environment Variables**: For local installation, you can set environment variables directly in the config
-4. **Multiple Servers**: You can add other MCP servers alongside the GPT-5 server
+1. **Claude Code CLI**: Use `claude mcp add` command for the easiest setup (requires Docker image to be built first)
+2. **Use Absolute Paths**: Always use absolute paths in configuration files and CLI commands  
+3. **Docker Image Name**: Ensure the Docker image name matches what you built (`gpt5-mcp:latest`)
+4. **Environment Variables**: For local installation, you can set environment variables directly in the config
+5. **Multiple Servers**: You can add other MCP servers alongside the GPT-5 server
+6. **CLI Benefits**: The CLI command automatically handles JSON formatting and path validation
+7. **Server Startup**: Claude Desktop starts the Docker container automatically when needed - no need to run containers manually
 
 ### Example Complete Configuration
 
@@ -400,17 +465,33 @@ await mcp.call('set_cost_limits', {
 
 ## Cost Management
 
-### Pricing Model (Estimated)
+### Pricing Model (Official OpenAI Standard Tier Rates)
 
-**GPT-5 Pricing:**
-- **Input tokens**: $0.02 per 1K tokens
-- **Output tokens**: $0.06 per 1K tokens  
-- **Reasoning tokens**: $0.10 per 1K tokens (GPT-5 specific)
+**GPT-5 Pricing (per 1M tokens):**
+- **Input tokens**: $1.25 per 1M tokens ($0.00125 per 1K tokens)
+- **Output tokens**: $10.00 per 1M tokens ($0.01 per 1K tokens)  
+- **Cached input**: $0.125 per 1M tokens ($0.000125 per 1K tokens)
 
-**GPT-4 Fallback Pricing:**
-- **GPT-4 Turbo**: $0.01 input / $0.03 output per 1K tokens
-- **GPT-4**: $0.03 input / $0.06 output per 1K tokens
-- **GPT-3.5 Turbo**: $0.0005 input / $0.0015 output per 1K tokens
+**Alternative GPT-5 Models:**
+- **GPT-5 Mini**: $0.25 input / $2.00 output per 1M tokens (80% cost reduction)
+- **GPT-5 Nano**: $0.05 input / $0.40 output per 1M tokens (96% cost reduction)
+
+**GPT-4 Fallback Pricing (per 1M tokens):**
+- **GPT-4o**: $2.50 input / $10.00 output per 1M tokens (primary fallback)
+- **GPT-4o-mini**: $0.15 input / $0.60 output per 1M tokens (most cost-effective)
+- **GPT-4 Turbo**: $10.00 input / $30.00 output per 1M tokens
+- **GPT-4 (legacy)**: $30.00 input / $60.00 output per 1M tokens
+- **GPT-3.5 Turbo**: $0.50 input / $1.50 output per 1M tokens
+
+**Cost Comparison**: GPT-5 is significantly more cost-effective than originally estimated. GPT-4o-mini remains the most economical fallback option at 6x cheaper input costs than GPT-5.
+
+**Processing Tiers Available**: 
+- **Batch**: 50% discount (slower processing)
+- **Flex**: 50% discount (variable latency)  
+- **Standard**: Listed prices (normal processing)
+- **Priority**: 2x cost (faster processing)
+
+*See `docs/openai_api_costs.md` for complete pricing details across all tiers and models.*
 
 ### Cost Controls
 - **Daily limits**: Prevent exceeding daily budget
@@ -439,6 +520,9 @@ gpt5-mcp/
 │   ├── conversation.ts    # Conversation management
 │   └── types.ts          # TypeScript interfaces
 ├── tests/                 # Jest unit tests
+├── docs/
+│   ├── openai_api_costs.md # Complete OpenAI pricing reference
+│   └── *.md              # Additional documentation
 ├── dist/                  # Compiled JavaScript
 ├── data/                  # Persistent storage
 ├── Dockerfile            # Docker configuration
@@ -466,9 +550,11 @@ pnpm run clean            # Remove build artifacts
 ## Troubleshooting
 
 ### Connection Issues
-- Verify your OpenAI API key is valid
-- Check network connectivity
-- Ensure GPT-5 access is enabled for your account (server will fallback to GPT-4 if unavailable)
+- **Verify your OpenAI API key is valid** and set in `.env` file as `OPENAI_API_KEY=sk-your-key`
+- **Check API key format**: Must start with `sk-` and be the full key from OpenAI
+- **Verify GPT-5 access**: Ensure GPT-5 access is enabled for your account (server will fallback to GPT-4 if unavailable)
+- **Check network connectivity**: Ensure the server can reach api.openai.com
+- **Test API key**: You can test with: `docker run --rm -i --env-file .env gpt5-mcp:latest`
 
 ### Parameter Errors
 **GPT-5 API Parameter Issues:**

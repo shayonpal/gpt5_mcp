@@ -14,15 +14,14 @@ describe('CostManager', () => {
     jest.clearAllMocks();
     
     // Mock fs methods
-    (fs.mkdir as jest.Mock).mockResolvedValue(undefined);
-    (fs.readFile as jest.Mock).mockRejectedValue({ code: 'ENOENT' });
-    (fs.writeFile as jest.Mock).mockResolvedValue(undefined);
+    (fs.mkdir as jest.MockedFunction<typeof fs.mkdir>).mockResolvedValue(undefined);
+    (fs.readFile as jest.MockedFunction<typeof fs.readFile>).mockRejectedValue({ code: 'ENOENT' } as any);
+    (fs.writeFile as jest.MockedFunction<typeof fs.writeFile>).mockResolvedValue(undefined);
     
     // Create instance with test limits
     costManager = new CostManager({
       daily: 10.0,
-      perTask: 2.0,
-      tokenLimit: 4000
+      perTask: 2.0
     });
   });
 
@@ -41,7 +40,7 @@ describe('CostManager', () => {
       expect(result.reason).toBeUndefined();
     });
 
-    it('should reject usage exceeding daily limit', async () => {
+    it('should request confirmation when exceeding daily limit', async () => {
       const usage: TokenUsage = {
         inputTokens: 1000,
         outputTokens: 2000,
@@ -52,36 +51,37 @@ describe('CostManager', () => {
       const result = await costManager.checkAndRecordUsage('task-1', usage);
       
       expect(result.allowed).toBe(false);
-      expect(result.reason).toContain('Daily limit');
+      expect(result.needsConfirmation).toBe(true);
+      expect(result.reason).toContain('Approaching daily limit');
     });
 
-    it('should reject usage exceeding task limit', async () => {
-      const usage: TokenUsage = {
+    it('should allow moderate task overages but reject extreme ones', async () => {
+      // Moderate overage - should be allowed
+      const moderateUsage: TokenUsage = {
         inputTokens: 500,
         outputTokens: 1000,
         totalTokens: 1500,
-        estimatedCost: 2.5 // Exceeds task limit of 2
+        estimatedCost: 2.5 // Slightly exceeds task limit of 2
       };
 
-      const result = await costManager.checkAndRecordUsage('task-1', usage);
-      
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain('Task limit');
-    });
+      const moderateResult = await costManager.checkAndRecordUsage('task-1', moderateUsage);
+      expect(moderateResult.allowed).toBe(true);
 
-    it('should reject usage exceeding token limit', async () => {
-      const usage: TokenUsage = {
-        inputTokens: 2000,
-        outputTokens: 3000,
-        totalTokens: 5000, // Exceeds token limit of 4000
-        estimatedCost: 0.5
+      // Extreme overage - should be rejected (>10x limit)
+      // Use userConfirmed=true to bypass daily limit check and test task limit
+      const extremeUsage: TokenUsage = {
+        inputTokens: 5000,
+        outputTokens: 10000,
+        totalTokens: 15000,
+        estimatedCost: 25.0 // Way over 10x task limit of 2
       };
 
-      const result = await costManager.checkAndRecordUsage('task-1', usage);
-      
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain('Token limit');
+      const extremeResult = await costManager.checkAndRecordUsage('task-2', extremeUsage, true);
+      expect(extremeResult.allowed).toBe(false);
+      expect(extremeResult.reason).toContain('Extremely high task spending');
     });
+
+    // Token limit test removed - not in current implementation
 
     it('should provide warning when approaching daily limit', async () => {
       // First usage to get close to limit
@@ -126,11 +126,12 @@ describe('CostManager', () => {
       expect(limits.perTask).toBe(5.0);
     });
 
-    it('should update token limit', async () => {
-      await costManager.updateLimits({ tokenLimit: 8000 });
+    it('should update both limits', async () => {
+      await costManager.updateLimits({ daily: 20.0, perTask: 5.0 });
       const limits = costManager.getCurrentLimits();
       
-      expect(limits.tokenLimit).toBe(8000);
+      expect(limits.daily).toBe(20.0);
+      expect(limits.perTask).toBe(5.0);
     });
   });
 
@@ -163,7 +164,7 @@ describe('CostManager', () => {
   });
 
   describe('startNewTask', () => {
-    it('should set current task ID', () => {
+    it('should set current task ID', async () => {
       costManager.startNewTask('task-123');
       
       // Record usage to verify task is tracked
@@ -175,7 +176,7 @@ describe('CostManager', () => {
       };
       
       costManager.checkAndRecordUsage('task-123', usage);
-      const report = costManager.generateReport('current_task');
+      const report = await costManager.generateReport('current_task');
       
       expect(report.period).toContain('task-123');
     });

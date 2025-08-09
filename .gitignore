@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Data and logs
+data/
+logs/
+*.log
+
+# Coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+*.test.js
+*.spec.js
+
+# Docker
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# Cache
+.cache/
+.npm/
+.pnpm-store/
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Debug
+.vscode-test/
+*.vsix

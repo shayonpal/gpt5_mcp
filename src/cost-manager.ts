@@ -20,6 +20,7 @@ export class CostManager {
   private dataDir: string;
   private usageHistory: UsageRecord[] = [];
   private currentTaskId: string | null = null;
+  private persistTimer: NodeJS.Timeout | null = null;
 
   constructor(limits: CostLimits = {}, dataDir = "./data") {
     this.limits = {
@@ -43,7 +44,8 @@ export class CostManager {
   async checkAndRecordUsage(
     taskId: string,
     usage: TokenUsage,
-    userConfirmed: boolean = false
+    userConfirmed: boolean = false,
+    options: { record?: boolean } = { record: true }
   ): Promise<{ allowed: boolean; reason?: string; warning?: string; needsConfirmation?: boolean }> {
     const today = new Date().toISOString().split("T")[0];
     const dailyTotal = this.dailyUsage.get(today) || 0;
@@ -93,12 +95,14 @@ export class CostManager {
             0
           )}% over limit of $${this.limits.daily.toFixed(2)})`
         );
+        this.sendAlert(`Daily spending exceeded limit: $${(dailyTotal + usage.estimatedCost).toFixed(2)} (> $${this.limits.daily.toFixed(2)})`);
       } else if (dailyPercentage > 80) {
         warnings.push(
           `Daily usage at ${dailyPercentage.toFixed(1)}% of limit ($${(
             dailyTotal + usage.estimatedCost
           ).toFixed(2)} / $${this.limits.daily.toFixed(2)})`
         );
+        this.sendAlert(`Daily spending at ${dailyPercentage.toFixed(1)}% of limit ($${(dailyTotal + usage.estimatedCost).toFixed(2)} / $${this.limits.daily.toFixed(2)})`);
       }
     }
 
@@ -128,8 +132,10 @@ export class CostManager {
       warning = warnings.join("; ");
     }
 
-    // Record the usage
-    await this.recordUsage(taskId, usage);
+    // Record the usage unless caller asked for a dry-run check
+    if (options.record !== false) {
+      await this.recordUsage(taskId, usage);
+    }
 
     return { allowed: true, warning };
   }
@@ -161,7 +167,8 @@ export class CostManager {
     this.currentTaskId = taskId;
 
     // Persist data
-    await this.persistData();
+    this.schedulePersist();
+    this.appendUsageCsv(taskId, usage).catch(() => {});
   }
 
   async getDailyReport(): Promise<{
@@ -347,6 +354,7 @@ export class CostManager {
   private async persistData(): Promise<void> {
     try {
       const dataFile = path.join(this.dataDir, "usage.json");
+      const tmpFile = dataFile + '.tmp';
       const data = {
         limits: this.limits,
         dailyUsage: Array.from(this.dailyUsage.entries()),
@@ -358,10 +366,60 @@ export class CostManager {
         currentTaskId: this.currentTaskId,
       };
 
-      await fs.writeFile(dataFile, JSON.stringify(data, null, 2));
+      await fs.writeFile(tmpFile, JSON.stringify(data, null, 2));
+      await fs.rename(tmpFile, dataFile);
     } catch (error) {
       console.error("Failed to persist cost data:", error);
     }
+  }
+
+  private schedulePersist(): void {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persistData();
+    }, 1000);
+  }
+
+  private async appendUsageCsv(taskId: string, usage: TokenUsage): Promise<void> {
+    try {
+      const csvFile = path.join(this.dataDir, 'usage.csv');
+      const row = [
+        new Date().toISOString(),
+        taskId,
+        usage.inputTokens,
+        usage.outputTokens,
+        usage.reasoningTokens ?? 0,
+        usage.totalTokens,
+        usage.estimatedCost
+      ].join(',') + '\n';
+      await fs.appendFile(csvFile, row, 'utf-8');
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  private async sendAlert(message: string): Promise<void> {
+    try {
+      const url = process.env.ALERT_WEBHOOK_URL;
+      if (!url) return;
+      // Node18 fetch available
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message, timestamp: new Date().toISOString() })
+      } as any);
+    } catch {
+      // ignore alert errors
+    }
+  }
+
+  async flush(): Promise<void> {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    await this.persistData();
   }
 
   private async loadPersistedData(): Promise<void> {

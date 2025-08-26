@@ -16,7 +16,7 @@ export class ConversationManager {
     this.maxMessagesPerConversation = maxMessagesPerConversation;
   }
 
-  startConversation(topic: string, instructions?: string): string {
+  startConversation(topic: string, instructions?: string, budgetLimit?: number): string {
     // Clean up if we're at max capacity
     if (this.conversations.size >= this.maxConversations) {
       this.cleanupOldestConversation();
@@ -42,7 +42,8 @@ export class ConversationManager {
         lastActive: new Date(),
         totalCost: 0,
         tokenCount: 0,
-        topic
+        topic,
+        budgetLimit
       }
     };
 
@@ -104,7 +105,7 @@ export class ConversationManager {
     return conversation.messages.slice(-maxMessages);
   }
 
-  formatForAPI(conversationId: string, newMessage?: string): any[] {
+  formatForAPI(conversationId: string, newMessage?: string, maxMessages?: number): any[] {
     const conversation = this.conversations.get(conversationId);
     if (!conversation) {
       throw new Error(`Conversation ${conversationId} not found`);
@@ -112,8 +113,14 @@ export class ConversationManager {
 
     const messages: any[] = [];
 
+    // Determine context window size
+    const contextLimit = typeof maxMessages === 'number'
+      ? Math.max(1, maxMessages)
+      : (conversation.metadata.contextLimit || parseInt(process.env.MAX_CONVERSATION_CONTEXT || '10'));
+
     // Convert conversation messages to API format
-    for (const msg of conversation.messages) {
+    const sourceMessages = conversation.messages.slice(-contextLimit);
+    for (const msg of sourceMessages) {
       if (msg.role === 'developer') {
         // Developer messages become part of instructions
         continue;
@@ -149,6 +156,25 @@ export class ConversationManager {
     }
 
     return undefined;
+  }
+
+  setOptions(conversationId: string, options: Partial<{ budgetLimit: number; contextLimit: number }>): void {
+    const conversation = this.conversations.get(conversationId);
+    if (!conversation) {
+      throw new Error(`Conversation ${conversationId} not found`);
+    }
+
+    if (typeof options.budgetLimit === 'number') {
+      conversation.metadata.budgetLimit = options.budgetLimit;
+    }
+    if (typeof options.contextLimit === 'number') {
+      conversation.metadata.contextLimit = Math.max(1, Math.floor(options.contextLimit));
+    }
+    conversation.metadata.lastActive = new Date();
+  }
+
+  getMetadata(conversationId: string): Conversation | undefined {
+    return this.conversations.get(conversationId);
   }
 
   updateMetadata(

@@ -36,6 +36,8 @@ export interface ConversationMetadata {
   totalCost: number;
   tokenCount: number;
   topic?: string;
+  budgetLimit?: number;
+  contextLimit?: number;
 }
 
 export interface CostReport {

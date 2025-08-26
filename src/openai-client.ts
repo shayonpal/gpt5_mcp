@@ -2,13 +2,19 @@ import OpenAI from 'openai';
 import { TokenUsage, GPT5Response, ReasoningEffort } from './types.js';
 
 // Pricing per 1K tokens (official OpenAI Standard tier rates)
-const PRICING = {
+const PRICING: Record<string, { input: number; output: number; cached?: number; reasoning?: number }> = {
   'gpt-5': {
-    input: 0.00125,   // $1.25 per 1M tokens = $0.00125 per 1K tokens
-    output: 0.01,     // $10.00 per 1M tokens = $0.01 per 1K tokens
-    cached: 0.000125, // $0.125 per 1M tokens = $0.000125 per 1K tokens
-    reasoning: 0.01   // Using output rate for reasoning tokens (no official rate specified)
-  }
+    input: 0.00125,
+    output: 0.01,
+    cached: 0.000125,
+    reasoning: 0.01
+  },
+  'gpt-4o': { input: 0.0025, output: 0.01 },
+  'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
+  'gpt-4-turbo-preview': { input: 0.01, output: 0.03 },
+  'gpt-4-turbo': { input: 0.01, output: 0.03 },
+  'gpt-4': { input: 0.03, output: 0.06 },
+  'gpt-3.5-turbo': { input: 0.0005, output: 0.0015 }
 };
 
 export class GPT5Client {
@@ -35,41 +41,52 @@ export class GPT5Client {
     temperature?: number;
     reasoning?: { effort: ReasoningEffort };
     maxTokens?: number;
+    stream?: boolean;
   }): Promise<GPT5Response> {
+    // Always try Responses API first, with robust mapping and retry
+    const requestParams: any = { model: this.getResponsesModel() };
+    
+    // Map input to Responses API format
+    if (typeof params.input === 'string') {
+      requestParams.input = params.input;
+    } else if (Array.isArray(params.input)) {
+      // Expect array of { role, content: string }
+      requestParams.input = params.input
+        .filter((m: any) => m && m.role && typeof m.content === 'string')
+        .map((m: any) => ({
+          role: m.role,
+          content: [{ type: 'input_text', text: m.content }]
+        }));
+    }
+
+    if (params.instructions) {
+      requestParams.instructions = params.instructions;
+    }
+
+    requestParams.reasoning = params.reasoning || { effort: this.defaultReasoningEffort };
+
     try {
-      // Using the new Responses API format from the documentation
-      const requestParams: any = {
-        model: 'gpt-5',
-        input: params.input
-      };
-
-      if (params.instructions) {
-        requestParams.instructions = params.instructions;
+      if (params.stream) {
+        // Streamed responses aggregation
+        const stream = await this.requestWithRetry(async () => (this.client as any).responses.stream(requestParams));
+        let text = '';
+        await new Promise<void>((resolve, reject) => {
+          stream.on('text', (delta: string) => { text += delta; });
+          stream.on('end', resolve);
+          stream.on('error', reject);
+        });
+        const fakeUsage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+        return { text, usage: this.extractUsage({ usage: fakeUsage }), raw: { streamed: true } };
       }
-
-      if (params.reasoning) {
-        requestParams.reasoning = params.reasoning;
-      } else {
-        requestParams.reasoning = { effort: this.defaultReasoningEffort };
-      }
-
-      // Note: GPT-5 Responses API doesn't support temperature or max_tokens parameters
-      // These parameters are only added in the fallback to chat completions
-
-      // Call the new responses.create endpoint
-      const response = await (this.client as any).responses.create(requestParams);
-
+      const response = await this.requestWithRetry(async () => (this.client as any).responses.create(requestParams));
       return {
         text: response.output_text || this.extractTextFromOutput(response.output),
         usage: this.extractUsage(response),
         raw: response
       };
     } catch (error: any) {
-      // Fallback to standard chat completions if responses API is not available
-      if (error.status === 404 || error.message?.includes('responses')) {
-        return this.fallbackToChatCompletions(params);
-      }
-      throw error;
+      // Fallback broadly to chat completions on any failure
+      return this.fallbackToChatCompletions(params);
     }
   }
 
@@ -79,6 +96,7 @@ export class GPT5Client {
     temperature?: number;
     reasoning?: { effort: ReasoningEffort };
     maxTokens?: number;
+    stream?: boolean;
   }): Promise<GPT5Response> {
     console.warn('Falling back to chat completions API (responses API not available)');
     
@@ -114,22 +132,49 @@ export class GPT5Client {
     }
 
     // Use the most capable and cost-effective models available
-    const models = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo-preview', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'];
+    const models = this.getFallbackModels();
     let response: any;
     let modelUsed = 'gpt-4o';
 
     for (const model of models) {
       try {
-        response = await this.client.chat.completions.create({
-          model,
-          messages,
-          temperature: params.temperature ?? this.defaultTemperature,
-          max_tokens: params.maxTokens ?? 4000 // Fallback default for GPT-4 only
-        });
+        if (params.stream) {
+          const stream = await this.requestWithRetry(async () => this.client.chat.completions.create({
+            model,
+            messages,
+            temperature: params.temperature ?? this.defaultTemperature,
+            max_tokens: params.maxTokens ?? 4000,
+            stream: true
+          } as any));
+          let text = '';
+          // @ts-ignore: stream is an async iterator in newer SDKs; fallback to events if available
+          if (typeof (stream as any)[Symbol.asyncIterator] === 'function') {
+            for await (const chunk of stream as any) {
+              const content = chunk.choices?.[0]?.delta?.content;
+              if (content) text += content;
+            }
+          }
+          return {
+            text,
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCost: 0 },
+            raw: { streamed: true, model }
+          } as GPT5Response;
+        } else {
+          response = await this.requestWithRetry(async () => this.client.chat.completions.create({
+            model,
+            messages,
+            temperature: params.temperature ?? this.defaultTemperature,
+            max_tokens: params.maxTokens ?? 4000 // Fallback default for GPT-4 only
+          }));
+        }
         modelUsed = model;
         break;
       } catch (error: any) {
         if (!error.message?.includes('model')) {
+          // For non-model errors, try next model only if rate-limit/server error; otherwise rethrow
+          if (error.status === 429 || (error.status && error.status >= 500)) {
+            continue;
+          }
           throw error;
         }
         // Try next model
@@ -189,9 +234,12 @@ export class GPT5Client {
   }
 
   private calculateCost(usage: any): number {
-    const inputCost = ((usage.prompt_tokens || usage.input_tokens || 0) * PRICING['gpt-5'].input) / 1000;
-    const outputCost = ((usage.completion_tokens || usage.output_tokens || 0) * PRICING['gpt-5'].output) / 1000;
-    const reasoningCost = ((usage.reasoning_tokens || 0) * PRICING['gpt-5'].reasoning) / 1000;
+    const model = this.getResponsesModel();
+    const pricing = PRICING[model] || PRICING['gpt-5'];
+    const inputCost = ((usage.prompt_tokens || usage.input_tokens || 0) * pricing.input) / 1000;
+    const outputCost = ((usage.completion_tokens || usage.output_tokens || 0) * pricing.output) / 1000;
+    const reasoningRate = pricing.reasoning ?? pricing.output;
+    const reasoningCost = ((usage.reasoning_tokens || 0) * reasoningRate) / 1000;
     
     return Number((inputCost + outputCost + reasoningCost).toFixed(4));
   }
@@ -224,6 +272,39 @@ export class GPT5Client {
     } catch (error) {
       console.error('Connection test failed:', error);
       return false;
+    }
+  }
+
+  private getResponsesModel(): string {
+    // Allow env override; default to 'gpt-5'
+    return process.env.OPENAI_RESPONSES_MODEL || process.env.GPT5_MODEL || 'gpt-5';
+  }
+
+  private getFallbackModels(): string[] {
+    const envList = process.env.OPENAI_FALLBACK_MODELS;
+    if (envList) return envList.split(',').map(s => s.trim()).filter(Boolean);
+    return ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo-preview', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'];
+  }
+
+  private async requestWithRetry<T>(fn: () => Promise<T>, retries = parseInt(process.env.OPENAI_RETRY_COUNT || '3'), baseDelayMs = parseInt(process.env.OPENAI_RETRY_BASE_DELAY_MS || '300')): Promise<T> {
+    let attempt = 0;
+    const timeoutMs = parseInt(process.env.OPENAI_TIMEOUT_MS || '30000');
+    while (true) {
+      try {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeoutMs);
+        // @ts-ignore pass signal if supported
+        const result = await fn();
+        clearTimeout(id);
+        return result;
+      } catch (err: any) {
+        attempt++;
+        const status = err?.status || err?.response?.status;
+        const retriable = status === 429 || (status >= 500 && status < 600);
+        if (!retriable || attempt > retries) throw err;
+        const delay = baseDelayMs * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 100);
+        await new Promise((res) => setTimeout(res, delay));
+      }
     }
   }
 }
